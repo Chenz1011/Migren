@@ -13,6 +13,8 @@ import { ponsLaunchAndBuyAbi } from './abi/pons.js';
 import { universalRouterAbi } from './abi/uniswap-v4.js';
 import { erc20Abi } from './abi/erc20.js';
 import { canSpend, markSniped, state } from './state.js';
+import { gmgnSwapEthToToken } from './gmgn.js';
+import { tg } from './telegram.js';
 
 type Reason = 'migration' | 'volume';
 
@@ -29,7 +31,7 @@ async function currentBalanceOf(token: Address): Promise<bigint> {
   }
 }
 
-async function sendTx(params: {
+async function sendDirectTx(params: {
   to: Address;
   value: bigint;
   data: Hex;
@@ -54,7 +56,6 @@ async function sendTx(params: {
     return null;
   }
 
-  // Pre-flight gas estimate — if it reverts, bail before paying gas.
   try {
     await httpClient.estimateGas({
       account: account.address,
@@ -92,26 +93,19 @@ async function sendTx(params: {
 }
 
 function applySlippage(amount: bigint, bps: bigint): bigint {
-  // amount * (10000 - bps) / 10000
   return (amount * (10000n - bps)) / 10000n;
 }
 
-async function snipeBondingCurve(token: Address, reason: Reason): Promise<void> {
-  log.info('attempting bonding-curve snipe via PonsLaunchAndBuy', { token, reason });
-
+async function directBondingCurve(token: Address, reason: Reason): Promise<Hex | null> {
+  log.info('direct route: PonsLaunchAndBuy.buy', { token, reason });
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 60);
-  // We don't have an off-chain quote for Pons curves, so set minTokensOut
-  // to 1 wei and rely on slippage via BUY_SIZE. A smarter version would
-  // query the curve for `getAmountOut`.
   const minOut = 1n;
-
   const data = encodeFunctionData({
     abi: ponsLaunchAndBuyAbi,
     functionName: 'buy',
     args: [token, minOut, account.address, deadline],
   });
-
-  await sendTx({
+  return sendDirectTx({
     to: config.ponsLaunchAndBuy,
     value: config.buySizeWei,
     data,
@@ -119,12 +113,6 @@ async function snipeBondingCurve(token: Address, reason: Reason): Promise<void> 
   });
 }
 
-// Build Universal Router payload: V4_SWAP exact-in ETH -> token.
-// Universal Router command byte 0x10 = V4_SWAP.
-// Inside V4_SWAP: actions=[SWAP_EXACT_IN_SINGLE, SETTLE_ALL, TAKE_ALL],
-// params=[(poolKey, zeroForOne, amountIn, amountOutMin, hookData), (ETH, amountIn), (token, amountOutMin)].
-// This is a best-effort encoder; if the router's command set differs on
-// Robinhood Chain, this will revert and gas estimate will catch it.
 function buildV4SwapCommand(args: {
   token: Address;
   weth: Address;
@@ -138,7 +126,6 @@ function buildV4SwapCommand(args: {
   const currency1 = currency0 === args.token ? args.weth : args.token;
   const zeroForOne = currency0.toLowerCase() === args.weth.toLowerCase();
 
-  // actions bytes: 0x06 SWAP_EXACT_IN_SINGLE, 0x0c SETTLE_ALL, 0x0f TAKE_ALL
   const actions = encodePacked(['uint8', 'uint8', 'uint8'], [0x06, 0x0c, 0x0f]);
 
   const poolKey = encodeAbiParameters(
@@ -154,7 +141,7 @@ function buildV4SwapCommand(args: {
 
   const swapParams = encodeAbiParameters(
     [
-      { type: 'bytes' }, // poolKey encoded
+      { type: 'bytes' },
       { type: 'bool' },
       { type: 'uint128' },
       { type: 'uint128' },
@@ -176,19 +163,19 @@ function buildV4SwapCommand(args: {
     [actions, [swapParams, settleParams, takeParams]],
   );
 
-  const commands = '0x10' as Hex; // single V4_SWAP command
+  const commands = '0x10' as Hex;
   return { commands, inputs: [v4SwapPayload] };
 }
 
-async function snipeUniswapV4(token: Address, reason: Reason): Promise<void> {
+async function directUniswapV4(token: Address, reason: Reason): Promise<Hex | null> {
   if (!config.universalRouter || !config.weth) {
-    log.warn('post-graduation snipe skipped — UNIVERSAL_ROUTER or WETH_ADDRESS not set');
-    return;
+    log.warn('direct post-graduation skipped — UNIVERSAL_ROUTER or WETH_ADDRESS not set');
+    return null;
   }
-  log.info('attempting post-graduation snipe via Universal Router V4', { token, reason });
+  log.info('direct route: Universal Router V4', { token, reason });
 
   const amountIn = config.buySizeWei;
-  const amountOutMin = applySlippage(1n, config.maxSlippageBps); // best-effort; real quote needs pool read
+  const amountOutMin = applySlippage(1n, config.maxSlippageBps);
 
   const { commands, inputs } = buildV4SwapCommand({
     token,
@@ -207,7 +194,7 @@ async function snipeUniswapV4(token: Address, reason: Reason): Promise<void> {
     args: [commands, inputs, deadline],
   });
 
-  await sendTx({
+  return sendDirectTx({
     to: config.universalRouter,
     value: amountIn,
     data,
@@ -221,21 +208,37 @@ export async function snipe(reason: Reason): Promise<void> {
     return;
   }
   const token = state.token;
+  const sizeEth = formatEther(config.buySizeWei);
 
   const prevBalance = await currentBalanceOf(token);
   log.info('🎯 snipe triggered', {
     reason,
     token,
-    sizeEth: formatEther(config.buySizeWei),
+    sizeEth,
     phase: state.phase,
+    route: config.executionRoute,
     prevBalance: prevBalance.toString(),
   });
 
-  if (state.phase === 'graduated') {
-    await snipeUniswapV4(token, reason);
+  let txHash: string | undefined;
+
+  if (config.executionRoute === 'GMGN') {
+    // GMGN router picks fastest route automatically — pre or post graduation.
+    const res = await gmgnSwapEthToToken({ token, amountWei: config.buySizeWei });
+    if (res.ok) {
+      if (!config.dryRun) markSniped(config.buySizeWei);
+      txHash = res.txHash;
+    }
   } else {
-    await snipeBondingCurve(token, reason);
+    // DIRECT route
+    const hash =
+      state.phase === 'graduated'
+        ? await directUniswapV4(token, reason)
+        : await directBondingCurve(token, reason);
+    if (hash) txHash = hash;
   }
+
+  void tg.execute({ reason, token, sizeEth, txHash, dryRun: config.dryRun });
 
   if (!config.dryRun) {
     const newBalance = await currentBalanceOf(token);

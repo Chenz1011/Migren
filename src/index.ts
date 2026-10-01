@@ -7,6 +7,8 @@ import { watchGraduation } from './graduation.js';
 import { watchVolume } from './volume.js';
 import { snipe } from './sniper.js';
 import { formatEther } from 'viem';
+import { startPriceFeed, getEthUsd } from './price.js';
+import { tg } from './telegram.js';
 
 async function main() {
   log.info('========================================');
@@ -14,7 +16,11 @@ async function main() {
   log.info('========================================');
   logStartup();
 
-  // Pre-flight balance check so you know gas is covered.
+  if (config.executionRoute === 'GMGN' && !config.gmgnApiKey) {
+    log.error('EXECUTION_ROUTE=GMGN tapi GMGN_API_KEY kosong. Isi .env dulu.');
+    process.exit(1);
+  }
+
   const bal = await httpClient.getBalance({ address: account.address });
   log.info('wallet balance', { eth: formatEther(bal) });
   if (bal < config.buySizeWei) {
@@ -24,26 +30,38 @@ async function main() {
     });
   }
 
-  log.info('config', {
+  await startPriceFeed();
+
+  log.info('config summary', {
+    route: config.executionRoute,
     ticker: config.targetTicker,
     buySizeEth: formatEther(config.buySizeWei),
-    maxSlippageBps: Number(config.maxSlippageBps),
     triggers: {
       migration: config.triggerOnMigration,
       volumeSpike: config.triggerOnVolumeSpike,
-      volumeThresholdEth: formatEther(config.volumeSpikeWei),
+      volumeThresholdUsd: config.volumeSpikeUsd,
       volumeWindowSec: config.volumeWindowSec,
     },
+    ethUsd: getEthUsd() || '(pending)',
     dryRun: config.dryRun,
     maxTotalSpendEth: formatEther(config.maxTotalSpendWei),
+    telegram: config.telegramBotToken ? 'enabled' : 'disabled',
   });
 
+  await tg.startup(
+    account.address,
+    config.targetTicker,
+    formatEther(config.buySizeWei),
+    config.executionRoute,
+  );
+
   if (config.dryRun) {
-    log.warn('⚠️  DRY_RUN=true — no real tx will be submitted. Set DRY_RUN=false in .env when you are ready.');
+    log.warn('⚠️  DRY_RUN=true — tx NOT akan di-submit. Set DRY_RUN=false pas lu udah siap.');
   }
 
   await discoverLoop(async (token) => {
     log.info('token locked in, starting watchers', { token });
+    void tg.discovery(token, config.targetTicker);
 
     const triggerSnipe = async (reason: 'migration' | 'volume') => {
       if (state.phase === 'sniped' || state.phase === 'exhausted') {
@@ -60,6 +78,7 @@ async function main() {
         watchGraduation(() => {
           if (!state.migrationTriggered) {
             state.migrationTriggered = true;
+            void tg.trigger('migration', 'NIMORI graduated from bonding curve → Uniswap V4');
             void triggerSnipe('migration');
           }
         }),
@@ -78,13 +97,13 @@ async function main() {
     log.info('all watchers armed');
   });
 
-  // Keep process alive forever; event watchers run on their own timers.
   await new Promise(() => {});
 }
 
 main().catch((e) => {
   log.error('fatal', { err: e?.message ?? String(e) });
-  process.exit(1);
+  void tg.error('main', e?.message ?? String(e));
+  setTimeout(() => process.exit(1), 1000).unref();
 });
 
 process.on('SIGINT', () => {

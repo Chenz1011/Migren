@@ -3,20 +3,22 @@ import { wsClient } from './chain.js';
 import { config } from './config.js';
 import { log } from './log.js';
 import { state } from './state.js';
+import { ethWeiToUsd, getEthUsd } from './price.js';
+import { tg } from './telegram.js';
 
 const TRANSFER_TOPIC = keccak256(toBytes('Transfer(address,address,uint256)'));
 
 type Buy = { ts: number; wei: bigint };
-const window: Buy[] = [];
+const windowBuys: Buy[] = [];
 
 function prune(nowSec: number) {
   const cutoff = nowSec - config.volumeWindowSec;
-  while (window.length && window[0].ts < cutoff) window.shift();
+  while (windowBuys.length && windowBuys[0].ts < cutoff) windowBuys.shift();
 }
 
 function windowSumWei(): bigint {
   let s = 0n;
-  for (const b of window) s += b.wei;
+  for (const b of windowBuys) s += b.wei;
   return s;
 }
 
@@ -24,10 +26,6 @@ export async function watchVolume(onSpike: () => void): Promise<void> {
   if (!state.token) throw new Error('watchVolume called before token discovered');
   const token = state.token;
 
-  // Approach: watch Transfer events on the TARGET token. Any Transfer where
-  // `from` is the bonding-curve/hook/pool-ish contract and `to` is a user
-  // wallet is a BUY. We approximate the ETH value by reading tx.value from
-  // the same transaction. Reading tx per log is a cost, so we batch per tx.
   const seenTx = new Set<string>();
 
   const unwatch = wsClient.watchEvent({
@@ -54,26 +52,38 @@ export async function watchVolume(onSpike: () => void): Promise<void> {
         try {
           const tx = await wsClient.getTransaction({ hash: txHash as Hex });
           if (tx.value > 0n) {
-            window.push({ ts: nowSec, wei: tx.value });
-            const sum = windowSumWei();
+            windowBuys.push({ ts: nowSec, wei: tx.value });
+            const sumWei = windowSumWei();
+            const sumUsd = ethWeiToUsd(sumWei);
             log.debug('buy observed', {
               tx: txHash,
               valueEth: formatEther(tx.value),
-              windowEth: formatEther(sum),
+              windowEth: formatEther(sumWei),
+              windowUsd: sumUsd.toFixed(2),
+              ethUsd: getEthUsd(),
             });
-            if (sum >= config.volumeSpikeWei && !state.volumeTriggered) {
+
+            if (
+              sumUsd >= config.volumeSpikeUsd &&
+              !state.volumeTriggered &&
+              getEthUsd() > 0
+            ) {
               log.info('🔥 volume spike detected', {
-                windowEth: formatEther(sum),
-                thresholdEth: formatEther(config.volumeSpikeWei),
+                windowUsd: sumUsd.toFixed(2),
+                thresholdUsd: config.volumeSpikeUsd,
                 windowSec: config.volumeWindowSec,
               });
               state.volumeTriggered = true;
+              void tg.trigger(
+                'volume spike',
+                `$${sumUsd.toFixed(0)} in ${config.volumeWindowSec}s (threshold $${config.volumeSpikeUsd})`,
+              );
               onSpike();
               unwatch();
               return;
             }
           }
-        } catch (e) {
+        } catch {
           log.debug('failed to fetch tx for volume', { tx: txHash });
         }
       }
@@ -84,6 +94,6 @@ export async function watchVolume(onSpike: () => void): Promise<void> {
   log.info('watching volume on token', {
     token,
     windowSec: config.volumeWindowSec,
-    thresholdEth: formatEther(config.volumeSpikeWei),
+    thresholdUsd: config.volumeSpikeUsd,
   });
 }

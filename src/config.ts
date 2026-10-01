@@ -26,11 +26,11 @@ function num(name: string, fallback: number): number {
   return n;
 }
 
-function addr(name: string, allowZero = false): Address {
+function addr(name: string): Address {
   const v = req(name);
   if (!isAddress(v)) throw new Error(`Invalid address in ${name}: ${v}`);
   const checked = getAddress(v);
-  if (!allowZero && checked === '0x0000000000000000000000000000000000000000') {
+  if (checked === '0x0000000000000000000000000000000000000000') {
     throw new Error(`${name} is zero address — set it in .env`);
   }
   return checked;
@@ -51,15 +51,28 @@ if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
   throw new Error('PRIVATE_KEY must be 32-byte hex (0x + 64 chars)');
 }
 
+const execRoute = opt('EXECUTION_ROUTE', 'GMGN').toUpperCase();
+if (execRoute !== 'GMGN' && execRoute !== 'DIRECT') {
+  throw new Error(`EXECUTION_ROUTE must be GMGN or DIRECT, got: ${execRoute}`);
+}
+
 export const config = {
   privateKey,
+
+  executionRoute: execRoute as 'GMGN' | 'DIRECT',
+
+  gmgnApiKey: opt('GMGN_API_KEY'),
+  gmgnChain: opt('GMGN_CHAIN', 'robinhood'),
+  gmgnAntiMev: bool('GMGN_ANTI_MEV', true),
+  gmgnAutoSlippage: bool('GMGN_AUTO_SLIPPAGE', true),
+
   rpcHttp: opt('RPC_HTTP_URL', 'https://rpc.mainnet.chain.robinhood.com'),
   rpcWs: opt('RPC_WS_URL'),
 
   targetTicker: opt('TARGET_TICKER', 'NIMORI').toUpperCase(),
   targetTokenAddress: addrOpt('TARGET_TOKEN_ADDRESS'),
 
-  buySizeWei: parseEther(opt('BUY_SIZE_ETH', '0.05')),
+  buySizeWei: parseEther(opt('BUY_SIZE_ETH', '0.075')),
   maxSlippageBps: BigInt(num('MAX_SLIPPAGE_BPS', 1500)),
 
   priorityFeeWei: parseGwei(opt('PRIORITY_FEE_GWEI', '0.5')),
@@ -68,10 +81,16 @@ export const config = {
   triggerOnMigration: bool('TRIGGER_ON_MIGRATION', true),
   triggerOnVolumeSpike: bool('TRIGGER_ON_VOLUME_SPIKE', true),
   volumeWindowSec: num('VOLUME_WINDOW_SECONDS', 60),
-  volumeSpikeWei: parseEther(opt('VOLUME_SPIKE_ETH', '1.0')),
+  volumeSpikeUsd: num('VOLUME_SPIKE_USD', 12_500),
 
   dryRun: bool('DRY_RUN', true),
   maxTotalSpendWei: parseEther(opt('MAX_TOTAL_SPEND_ETH', '0.5')),
+
+  telegramBotToken: opt('TELEGRAM_BOT_TOKEN'),
+  telegramChatId: opt('TELEGRAM_CHAT_ID'),
+  tgNotifyDiscovery: bool('TELEGRAM_NOTIFY_ON_DISCOVERY', true),
+  tgNotifyTrigger: bool('TELEGRAM_NOTIFY_ON_TRIGGER', true),
+  tgNotifyExecute: bool('TELEGRAM_NOTIFY_ON_EXECUTE', true),
 
   ponsLaunchFactory: addr('PONS_LAUNCH_FACTORY'),
   ponsLaunchAndBuy: addr('PONS_LAUNCH_AND_BUY'),
@@ -80,9 +99,11 @@ export const config = {
   universalRouter: addrOpt('UNIVERSAL_ROUTER'),
   weth: addrOpt('WETH_ADDRESS'),
 
-  gmgnEnabled: bool('GMGN_ENABLED', false),
-  gmgnApiKey: opt('GMGN_API_KEY'),
-  gmgnBaseUrl: opt('GMGN_BASE_URL', 'https://gmgn.ai/defi/router/v1'),
+  priceSourceUrl: opt(
+    'PRICE_SOURCE_URL',
+    'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
+  ),
+  priceRefreshSec: num('PRICE_REFRESH_SECONDS', 120),
 
   logLevel: opt('LOG_LEVEL', 'info'),
 } as const;

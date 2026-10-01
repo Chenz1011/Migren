@@ -1,123 +1,238 @@
 # Migren — NIMORI sniper (Pons / Robinhood Chain)
 
-Bot buat snipe `$NIMORI` di [Pons launchpad](https://www.ponsfamily.com/launchpad)
-di Robinhood Chain (chain id `4663`). Dua trigger:
+Bot buat auto-snipe `$NIMORI` di [Pons launchpad](https://www.ponsfamily.com/launchpad)
+pake GMGN router (fastest route, auto anti-MEV). Trigger: migration ke V4 pool,
+atau volume spike ≥ $12,500 dalam 60 detik. Notif via Telegram tiap step.
 
-1. **Migration** — begitu NIMORI graduate dari bonding curve ke Uniswap V4 pool → beli.
-2. **Volume spike** — kalo rolling volume (ETH masuk via buy tx) di NIMORI
-   nembus threshold dalam window waktu tertentu → beli.
+---
 
-## Prereq
+## 🚀 QUICKSTART (COPY PASTE AJA)
 
-- Node.js 20+
-- Wallet dengan ETH di Robinhood Chain (buat beli + bayar gas)
-- RPC WebSocket (opsional tapi WAJIB kalo mau latency rendah).
-  Public endpoint `wss://rpc.mainnet.chain.robinhood.com` biasanya cukup
-  untuk test; buat production pakai dedicated (QuickNode / Chainstack / Dwellir / dRPC).
+### 1. Install Node.js 20+ (sekali aja)
 
-## Setup
+Kalo udah skip ke step 2. Kalo belum:
 
 ```bash
-# clone & masuk
-git clone <this-repo> migren
-cd migren
+# Mac (brew):
+brew install node
 
-# install
+# Ubuntu/Debian:
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# atau pake nvm (recommended, cross-platform):
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+nvm install 20
+```
+
+Cek:
+```bash
+node --version   # harus v20+
+```
+
+### 2. Clone repo + install deps
+
+```bash
+git clone https://github.com/Chenz1011/Migren.git
+cd Migren
+git checkout claude/wonderful-bardeen-0i4hc5
 npm install
-
-# config
-cp .env.example .env
-# edit .env, isi minimal: PRIVATE_KEY, RPC_WS_URL, BUY_SIZE_ETH
-
-# jalankan dalam DRY_RUN mode dulu (default: true)
-npm start
-
-# kalo semua udah logging bener, matikan dry-run di .env:
-#   DRY_RUN=false
-# lalu restart
-npm start
 ```
 
-## Env — apa yang perlu lu isi
-
-Yang **wajib** diisi manual:
-
-| Variable | Keterangan |
-|---|---|
-| `PRIVATE_KEY` | Priv key wallet lu, 0x + 64 hex. **Jangan commit**. |
-| `BUY_SIZE_ETH` | Jumlah ETH per snipe (contoh: `0.05`). |
-| `VOLUME_SPIKE_ETH` | Threshold volume (ETH) buat trigger spike. Default 1 ETH / 60s. |
-| `MAX_TOTAL_SPEND_ETH` | Fail-safe total cap selama bot jalan. |
-
-Yang **opsional tapi recommended**:
-
-| Variable | Keterangan |
-|---|---|
-| `RPC_WS_URL` | WebSocket RPC. Tanpa ini, bot fallback ke polling (lambat). |
-| `UNISWAP_V4_POOL_MANAGER` | V4 PoolManager address. Dibutuhkan buat deteksi graduation paling cepet. |
-| `UNIVERSAL_ROUTER` | Universal Router address. Dibutuhkan buat post-graduation swap. |
-| `WETH_ADDRESS` | WETH di Robinhood Chain. Dibutuhkan buat V4 swap path. |
-| `TARGET_TOKEN_ADDRESS` | Kalo lu udah tau address NIMORI, isi langsung — skip discovery. |
-
-Pons V2 factory/router/hook sudah di-prefill (per 2026-10). Ganti kalo Pons re-deploy.
-
-**GMGN API: ga wajib.** Default `GMGN_ENABLED=false`. Direct-chain execution
-lewat viem lebih kenceng dan ga ada API dependency. Modul `src/gmgn.ts` ada
-sebagai placeholder kalo lu mau fallback.
-
-## Priv key — perlu ga?
-
-**Perlu**, kalo mau snipe beneran. Dua alasan:
-- Direct on-chain execution butuh signer buat ngirim tx.
-- GMGN Agent API pun ujung-ujungnya tetep perlu signer (bot ini sign
-  lokal; GMGN cuma dipake buat quote/build-tx).
-
-Priv key cuma hidup di process ini (via `.env`) dan ga pernah dikirim keluar.
-Pastikan `.env` ada di `.gitignore` (udah di-set).
-
-## Flow bot
-
-```
-[discovering]  →  watch Pons factory, filter candidate addresses by symbol()
-     ↓   (symbol == NIMORI)
-[bonding-curve] →  arm migration watcher + volume watcher
-     ↓
-     ├─ migration event → snipe via PonsLaunchAndBuy  (if phase=curve)
-     │                   atau Universal Router V4     (if phase=graduated)
-     └─ volume spike   → same as above
-     ↓
-[sniped]       →  idle, log final balance
-```
-
-## Safety checklist
-
-- [ ] `DRY_RUN=true` dulu sampai lu liat log "token locked in" dan simulated snipe
-- [ ] `MAX_TOTAL_SPEND_ETH` di-set wajar (jangan all-in)
-- [ ] Wallet khusus bot, bukan main wallet lu
-- [ ] `.env` tidak pernah di-commit (`.gitignore` udah handle)
-- [ ] Pre-flight gas estimate otomatis — tx yang bakal revert di-skip (ga buang gas)
-
-## Hal yang masih manual / fragile
-
-- **Exact Pons event signatures** tidak dipublish. Bot ini resilient karena
-  decode address dari semua topics dan verify via `symbol()` — tapi kalo
-  Pons mengubah schema, perbaiki filter di `src/discovery.ts`.
-- **Universal Router V4 payload** di `src/sniper.ts` disusun generik; kalo
-  revert, cek dengan tx simulator (Tenderly fork Robinhood Chain) buat
-  liat selector/argumen yang bener. Pre-flight estimate otomatis skip
-  kalo bakal revert, jadi lu ga rugi gas — cuma snipe-nya ga eksekusi.
-- **NIMORI belum deploy** per 2026-10. Bot stays in `discovering` phase
-  sampai ada token dengan symbol "NIMORI" muncul dari Pons factory.
-
-## Monitor dari jauh
+### 3. Setup .env
 
 ```bash
-# tail log
-LOG_LEVEL=debug npm start | tee migren.log
+cp .env.example .env
+```
 
-# atau pake tmux / screen biar tetap jalan
+Buka `.env` di text editor (nano, vscode, apa aja):
+
+```bash
+nano .env     # atau: code .env
+```
+
+**Isi yang WAJIB (sisanya biarkan default):**
+
+```
+PRIVATE_KEY=0x<64 hex char priv key wallet lu>
+GMGN_API_KEY=<API key GMGN lu>
+TELEGRAM_BOT_TOKEN=<token dari @BotFather>
+TELEGRAM_CHAT_ID=<chat ID lu dari @userinfobot>
+```
+
+Yang udah default (ga perlu diganti kecuali lu mau):
+- `BUY_SIZE_ETH=0.075`
+- `VOLUME_SPIKE_USD=12500`
+- `VOLUME_WINDOW_SECONDS=60`
+- `TARGET_TICKER=NIMORI`
+- `DRY_RUN=true` ← **PENTING: biarkan true dulu buat testing**
+
+### 4. Setup Telegram bot (sekali aja)
+
+Kalo lu belum punya TG bot:
+
+1. Di Telegram, buka [@BotFather](https://t.me/BotFather) → kirim `/newbot` → kasih nama & username → dapet **token** (format: `123456789:AAE…`). Copy ke `TELEGRAM_BOT_TOKEN`.
+2. Buka [@userinfobot](https://t.me/userinfobot) → kirim `/start` → dapet **chat ID** (angka doang, misal `123456789`). Copy ke `TELEGRAM_CHAT_ID`.
+3. Buka bot lu (yg lu bikin di step 1) → kirim `/start` biar bot bisa DM lu.
+
+### 5. Test (DRY_RUN mode)
+
+```bash
+npm start
+```
+
+Lu bakal liat log kayak gini:
+```
+[INFO] wallet ready { "address": "0x..." }
+[INFO] rpc { "http": "...", "ws": "..." }
+[INFO] wallet balance { "eth": "0.1" }
+[INFO] price feed started { "ethUsd": 3456 }
+[INFO] config summary { ... }
+[WARN] ⚠️  DRY_RUN=true — tx NOT akan di-submit.
+[INFO] watching Pons factory for new launches { ... }
+```
+
+Dan TG lu bakal nerima pesan "🤖 Migren started". Kalo iya, berarti setup bener.
+
+### 6. Live mode
+
+Buka `.env` lagi, ganti:
+```
+DRY_RUN=false
+```
+
+Restart:
+```bash
+npm start
+```
+
+Udah. Bot bakal:
+- Watch Pons factory sampe NIMORI muncul
+- Begitu NIMORI graduate atau volume ≥ $12,500/60s → auto-snipe 0.075 ETH via GMGN router
+- Kirim notif TG tiap step: discovery, trigger, execute
+
+### 7. Biar jalan 24/7 (tmux)
+
+```bash
+# install tmux dulu kalo belum: brew install tmux (Mac) atau apt install tmux (Linux)
+
 tmux new -s migren
 npm start
-# Ctrl+b d  → detach
-# tmux attach -t migren
+# Ctrl+b lalu d  → detach (bot tetep jalan)
+
+# cek lagi nanti:
+tmux attach -t migren
+
+# matiin:
+tmux kill-session -t migren
+```
+
+---
+
+## 📝 Config quick reference
+
+Yang paling sering lu ubah:
+
+| Env var | Default | Keterangan |
+|---|---|---|
+| `BUY_SIZE_ETH` | `0.075` | ETH per snipe |
+| `VOLUME_SPIKE_USD` | `12500` | USD volume threshold |
+| `VOLUME_WINDOW_SECONDS` | `60` | Window volume (detik) |
+| `MAX_TOTAL_SPEND_ETH` | `0.5` | Fail-safe total cap |
+| `DRY_RUN` | `true` | Simulate only. Set `false` buat live. |
+| `TARGET_TICKER` | `NIMORI` | Ticker target |
+| `GMGN_ANTI_MEV` | `true` | Anti-sandwich protection |
+| `GMGN_AUTO_SLIPPAGE` | `true` | Slippage auto-pick by GMGN |
+
+Yang jarang disentuh:
+- `TRIGGER_ON_MIGRATION`, `TRIGGER_ON_VOLUME_SPIKE` — matiin salah satu kalo mau trigger tunggal
+- `TELEGRAM_NOTIFY_ON_*` — matiin notif per kategori
+- `EXECUTION_ROUTE` — `GMGN` (default) atau `DIRECT` (raw chain)
+- `RPC_WS_URL` — WebSocket RPC (biar event real-time)
+
+---
+
+## 🔧 Troubleshooting
+
+**`Missing required env: PRIVATE_KEY`**
+→ Isi `PRIVATE_KEY` di `.env`. Format: `0x` + 64 karakter hex.
+
+**`EXECUTION_ROUTE=GMGN tapi GMGN_API_KEY kosong`**
+→ Isi `GMGN_API_KEY` di `.env`.
+
+**`GMGN swap failed`**
+→ Cek log stderr. Biasanya karena chain name salah (confirm `GMGN_CHAIN=robinhood` persis), API key invalid, atau balance kurang. Rate limit GMGN: 1 call per 5 detik per API key.
+
+**TG notif ga masuk**
+→ Pastikan lu udah `/start` ke bot lu sendiri. Chat ID harus angka doang (contoh `123456789`), bukan `@username`.
+
+**Price feed `could not fetch ETH/USD`**
+→ Coingecko sometimes rate-limits. Ganti `PRICE_SOURCE_URL` ke endpoint lain yang return JSON dengan field `ethereum.usd` atau pakai Coinbase/Binance API.
+
+**Volume trigger ga fire padahal volume kelihatan tinggi**
+→ Bot ukur dari `tx.value` pas ada Transfer log. Kalo volume di aggregator (bukan buy langsung dari pool), mungkin ga ke-detect. Turunin threshold atau tambahin window.
+
+---
+
+## 🧠 Flow lengkap
+
+```
+[discovering]  →  watch Pons factory, decode address dari semua topics
+                  verify via symbol() → NIMORI? lock in.
+                  📱 TG: "🎯 NIMORI discovered"
+     ↓
+[bonding-curve] →  arm 2 watchers paralel:
+                   • graduation watch (V4 PoolManager + Pons hook + factory)
+                   • volume watch (Transfer events, USD threshold)
+     ↓
+     ├─ migration event detected
+     │  📱 TG: "🔥 Trigger: migration"
+     │  → snipe via GMGN router (auto post-grad path)
+     │  📱 TG: "✅ Entry EXECUTED"
+     │
+     └─ volume spike ≥ $12,500 in 60s
+        📱 TG: "🔥 Trigger: volume spike"
+        → snipe via GMGN router
+        📱 TG: "✅ Entry EXECUTED"
+     ↓
+[sniped]       →  idle, log final balance, TG terakhir dengan tx hash + explorer link
+```
+
+---
+
+## 🛡️ Safety
+
+- Priv key cuma di `.env` di mesin lu. `.gitignore` udah set, ga pernah ke-commit.
+- GMGN CLI sign lokal — key ga pernah dikirim ke server GMGN.
+- `MAX_TOTAL_SPEND_ETH` hard cap total spending.
+- Pre-flight gas estimate (DIRECT route) auto-skip tx yang bakal revert.
+- `DRY_RUN=true` default — HARUS test dulu sebelum live.
+
+**JANGAN:**
+- Pake wallet utama lu — bikin wallet khusus bot, transfer secukupnya.
+- Set `MAX_TOTAL_SPEND_ETH` di atas balance wallet.
+- Commit `.env` ke git (udah di-ignore sih, tapi tetep hati-hati).
+
+---
+
+## 📁 Struktur
+
+```
+src/
+├── index.ts          # orchestrator
+├── config.ts         # env loader
+├── chain.ts          # viem clients
+├── discovery.ts      # watch factory, symbol() filter
+├── graduation.ts     # multi-source grad detection
+├── volume.ts         # USD rolling window
+├── sniper.ts         # execution dispatcher (GMGN or DIRECT)
+├── gmgn.ts           # gmgn-cli subprocess wrapper
+├── telegram.ts       # notif helpers
+├── price.ts          # ETH/USD feed
+├── state.ts          # phase + flags
+├── log.ts            # structured logger
+└── abi/
+    ├── erc20.ts
+    ├── pons.ts
+    └── uniswap-v4.ts
 ```
