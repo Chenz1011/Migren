@@ -21,13 +21,20 @@ async function main() {
     process.exit(1);
   }
 
-  const bal = await httpClient.getBalance({ address: account.address });
-  log.info('wallet balance', { eth: formatEther(bal) });
-  if (bal < config.buySizeWei) {
-    log.warn('wallet balance below BUY_SIZE_ETH', {
-      balance: formatEther(bal),
-      buySize: formatEther(config.buySizeWei),
+  try {
+    const bal = await httpClient.getBalance({ address: account.address });
+    log.info('wallet balance', { eth: formatEther(bal) });
+    if (bal < config.buySizeWei) {
+      log.warn('wallet balance below BUY_SIZE_ETH', {
+        balance: formatEther(bal),
+        buySize: formatEther(config.buySizeWei),
+      });
+    }
+  } catch (e: any) {
+    log.warn('could not fetch wallet balance (RPC slow or down) — bot keeps running', {
+      err: e?.shortMessage ?? e?.message ?? String(e),
     });
+    log.warn('tip: isi RPC_HTTP_URL + RPC_WS_URL dari provider dedicated (QuickNode / Dwellir / dRPC) di .env');
   }
 
   await startPriceFeed();

@@ -27,7 +27,12 @@ export const account = privateKeyToAccount(config.privateKey);
 
 export const httpClient: PublicClient = createPublicClient({
   chain: robinhoodChain,
-  transport: http(config.rpcHttp, { batch: true, timeout: 10_000 }),
+  transport: http(config.rpcHttp, {
+    batch: true,
+    timeout: 30_000,
+    retryCount: 3,
+    retryDelay: 500,
+  }),
 });
 
 export const wsClient: PublicClient = config.rpcWs
@@ -40,7 +45,7 @@ export const wsClient: PublicClient = config.rpcWs
 export const wallet: WalletClient = createWalletClient({
   account,
   chain: robinhoodChain,
-  transport: http(config.rpcHttp, { timeout: 10_000 }),
+  transport: http(config.rpcHttp, { timeout: 30_000, retryCount: 3, retryDelay: 500 }),
 });
 
 export function logStartup() {
